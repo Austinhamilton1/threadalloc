@@ -8,9 +8,10 @@
 #define BLOCK_SIZE 64                                                   // Make sure the blocks can hold *most* generic datatypes.
 #define BLOCK_COUNT 1024                                                // 1024 blocks per slab.
 #define ALIGN_UP(x, align) (((x) + ((align) - 1)) & ~((align) - 1))     // Align x to the next multiple of align
-#define SLAB_OVERHEAD ALIGN_UP(sizeof(Slab), BLOCK_SIZE)                // This is how many blocks are used by the slab pointer.
+#define SLAB_OVERHEAD ALIGN_UP(sizeof(Slab), BLOCK_SIZE)              // This is how many blocks are used by the slab pointer.
 #define EFFECTIVE_BLOCKS (BLOCK_COUNT - SLAB_OVERHEAD)                  // This is how many blocks we can use.
 #define BLOCK_CACHE_LIMIT 64
+#define BLOCK_CACHE_REFILL_LIMIT 32
 
 // Key for cleaning up thread cache after use.
 static pthread_key_t thread_cache_key;
@@ -37,6 +38,7 @@ static void slab_thread_destructor(void *arg) {
             free(slab->raw_allocation);
 
         // Deallocate slab
+        free(slab);
         slab = next;
     }
 
@@ -44,12 +46,14 @@ static void slab_thread_destructor(void *arg) {
     slab = cache->partial_slabs;
     while(slab) {
         Slab *next = slab->next;
+
         // Deallocate blocks
         if(slab->raw_allocation)
             free(slab->raw_allocation);
 
-        slab = next;
         // Deallocate slab
+        free(slab);
+        slab = next;
     }
 
     // Deallocate cache
@@ -122,6 +126,7 @@ static Slab *allocate_new_slab() {
     // Store the slab's memory as the allocated memory
     slab->mem = (void *)aligned_addr;
     slab->raw_allocation = raw_mem;
+    *((Slab **)slab->mem) = slab;
 
     // Calculate where the actual blocks start (after the slab)
     void *block_start = (char *)slab->mem + (SLAB_OVERHEAD * BLOCK_SIZE);
@@ -169,6 +174,31 @@ void *slab_alloc() {
     if(cache->current_slab && cache->current_slab->free_count) {
         // Allocate from the cached slab
         Slab *slab = cache->current_slab;
+
+        // Check if we have enough to partially refil fastbin
+        if(cache->current_slab->free_count >= BLOCK_CACHE_REFILL_LIMIT) {
+            // Partially refill fastbin
+            for(int i = 0; i < BLOCK_CACHE_REFILL_LIMIT; i++) {
+                Block *b = slab->free_list;
+                slab->free_list = b->next;
+                slab->free_count--;
+
+                b->next = cache->fastbin;
+                cache->fastbin = b;
+                cache->fastbin_count++;
+            }
+
+            // If the batch refill completely empties the current slab, mark it as inactive to avoid reusing a depleted slab
+            if(__builtin_expect(slab->free_count == 0, 0))
+                cache->current_slab = NULL;
+
+            // Pop off top of fastbin
+            block = cache->fastbin;
+            cache->fastbin = block->next;
+            cache->fastbin_count--;
+            return (void *)block;
+        }
+
         block = slab->free_list;
         slab->free_list = block->next;
         slab->free_count--;
