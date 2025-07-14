@@ -8,8 +8,8 @@
 #define BLOCK_SIZE 64                                                   // Make sure the blocks can hold *most* generic datatypes.
 #define BLOCK_COUNT 1024                                                // 1024 blocks per slab.
 #define ALIGN_UP(x, align) (((x) + ((align) - 1)) & ~((align) - 1))     // Align x to the next multiple of align
-#define SLAB_POINTER_OVERHEAD ALIGN_UP(sizeof(Slab *), BLOCK_SIZE)      // This is how many blocks are used by the slab pointer.
-#define EFFECTIVE_BLOCKS (BLOCK_COUNT - SLAB_POINTER_OVERHEAD)          // This is how many blocks we can use.
+#define SLAB_OVERHEAD ALIGN_UP(sizeof(Slab), BLOCK_SIZE)                // This is how many blocks are used by the slab pointer.
+#define EFFECTIVE_BLOCKS (BLOCK_COUNT - SLAB_OVERHEAD)                  // This is how many blocks we can use.
 #define BLOCK_CACHE_LIMIT 64
 
 // Key for cleaning up thread cache after use.
@@ -37,7 +37,6 @@ static void slab_thread_destructor(void *arg) {
             free(slab->raw_allocation);
 
         // Deallocate slab
-        free(slab);
         slab = next;
     }
 
@@ -45,14 +44,12 @@ static void slab_thread_destructor(void *arg) {
     slab = cache->partial_slabs;
     while(slab) {
         Slab *next = slab->next;
-
         // Deallocate blocks
         if(slab->raw_allocation)
             free(slab->raw_allocation);
 
-        // Deallocate slab
-        free(slab);
         slab = next;
+        // Deallocate slab
     }
 
     // Deallocate cache
@@ -104,38 +101,30 @@ static inline ThreadCache *fast_thread_cache() {
  *     Slab * - An initialized slab ready for use or NULL on error.
  */
 static Slab *allocate_new_slab() {
-    // Allocate the slab and check for error
-    Slab *slab = (Slab *)malloc(sizeof(Slab));
-    if(!slab)
-        return NULL;
+    size_t alignment = BLOCK_SIZE * BLOCK_COUNT;
+    size_t total_size = alignment + alignment; // Extra space for alignment
+
+    // Allocate the slab memory and check for errors
+    void *raw_mem = malloc(total_size);
+    if(!raw_mem) return NULL;
+
+    // Align the memory
+    uintptr_t aligned_addr = ALIGN_UP((uintptr_t)raw_mem, alignment);
+
+    // Store the slab at the beginning of the memory region
+    Slab *slab = (Slab *)aligned_addr;
 
     // Set slab metadata
     slab->block_size = BLOCK_SIZE;
     slab->total_blocks = EFFECTIVE_BLOCKS;
     slab->free_count = EFFECTIVE_BLOCKS;
 
-    size_t alignment = BLOCK_SIZE * BLOCK_COUNT;
-    size_t total_size = alignment + alignment; // Extra space for alignment
-
-    // Allocate the slab memory and check for errors
-    void *raw_mem = malloc(total_size);
-    if(!raw_mem) {
-        free(slab);
-        return NULL;
-    }
-
-    // Align the memory
-    uintptr_t aligned_addr = ALIGN_UP((uintptr_t)raw_mem, alignment);
+    // Store the slab's memory as the allocated memory
     slab->mem = (void *)aligned_addr;
-
-    // Store the slab pointer at the beginning of the memory region
-    *((Slab **)slab->mem) = slab;
-
-    // Store the raw memory to free later
     slab->raw_allocation = raw_mem;
 
-    // Calculate where the actual blocks start (after the slab pointer)
-    void *block_start = (char *)slab->mem + (SLAB_POINTER_OVERHEAD * BLOCK_SIZE);
+    // Calculate where the actual blocks start (after the slab)
+    void *block_start = (char *)slab->mem + (SLAB_OVERHEAD * BLOCK_SIZE);
     
     // Set the free list
     Block *current = (Block *)block_start;
