@@ -10,8 +10,6 @@ typedef struct block {
 typedef struct slab {
     void *mem;                  // Aligned memory allocation.
     void *raw_allocation;       // Non-aligned allocation of the memory.
-    size_t block_size;          // Size of each block in the slab.
-    size_t total_blocks;        // Total number of blocks available in slab.
     size_t free_count;          // Total number of free blocks available in slab.
     Block *free_list;           // Linked list of blocks to allocate from.
     struct slab *next;          // If we use up one of the slabs, we need to allocate a new one, but keep tracking the old one.
